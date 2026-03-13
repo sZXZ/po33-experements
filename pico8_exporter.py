@@ -4,8 +4,7 @@ import math
 class Pico8Exporter:
     """
     Exports PO-33 data to PICO-8 format.
-    PICO-8 samples are typically 8-bit, 5512.5Hz.
-    PO-33 samples are 8-bit µ-law, 23437.5Hz.
+    Focuses on mapping samples to SFX 0-7 (custom instruments).
     """
     
     @staticmethod
@@ -25,58 +24,101 @@ class Pico8Exporter:
         else:
             return data
 
-    @staticmethod
-    def convert_to_p8_wav(data):
-        """
-        PICO-8 sfx data is stored in the __sfx__ section.
-        Each SFX is 64 notes (4 bytes each).
-        However, the user wants to convert PO-33 to PICO-8 cartridge.
-        The most common way is to fill the SFX memory with PWM samples.
-        """
-        # Linear PCM conversion
-        pcm = [Pico8Exporter.mu_law_decode(b) for b in data]
-        
-        # Normalize to PICO-8 range (0-255 for custom PCM if using that, but SFX uses notes)
-        # Actually, let's just create a raw text format for __sfx__ or __map__
-        # For an example, we'll just output the first few samples as SFX note data (very lossy)
-        return pcm
+    def extract_pcm(self, data):
+        """Extract raw linear PCM from PO-33 binary data."""
+        # Un-interleave if it's dual channel (we'll just use Left for simplicity)
+        # or treat the whole stream as a single source for now.
+        return [self.mu_law_decode(b) for b in data]
 
-    def create_p8_cart(self, pcm_data, output_path):
-        """Creates a basic .p8 file template."""
+    def create_p8_cart(self, pcm_data, config_list=None, pattern_map=None, melodies=None, output_path="output.p8"):
+        sfx_data = {}
+        
+        # 1. Instruments (0-7)
+        if config_list:
+            for conf in config_list:
+                s_id = int(conf.get('sfx_id', 0))
+                start = int(conf.get('start_byte', 0))
+                end = int(conf.get('end_byte', len(pcm_data)))
+                speed = int(conf.get('speed', 1))
+                sfx_data[s_id] = self._generate_sample_sfx(s_id, pcm_data[start:end], speed)
+
+        # 2. Sequential SFX (Patterns 8-63)
+        if melodies:
+            for mel in melodies:
+                m_id = mel.get('sfx_id')
+                speed = mel.get('speed', 16)
+                notes = mel.get('notes', []) # [(step, pitch, inst, vol)]
+                sfx_data[m_id] = self._generate_melody_sfx(m_id, speed, notes)
+
+        # Build final .p8 file
+        header = (
+            "pico-8 cartridge // http://www.pico-8.com\n"
+            "version 32\n"
+            "__lua__\n"
+            "function _init()\n"
+            "  cls()\n"
+            "  print(\"po-33 pattern 1 loaded\")\n"
+            "end\n"
+        )
+        
         with open(output_path, 'w') as f:
-            f.write("pico-8 cartridge // http://www.pico-8.com\n")
-            f.write("version 32\n")
-            f.write("__lua__\n")
-            f.write("-- po33 to pico8 conversion\n")
-            f.write("function _init()\n  print(\"po-33 data loaded\")\nend\n\n")
+            f.write(header)
             f.write("__sfx__\n")
-            # Fill SFX 0 with some data from the samples
-            # This is a dummy implementation just to show the data is being passed
-            for sfx_id in range(64):
-                f.write(f"{sfx_id:02x}010000") # Setup SFX speed 1, looping 0
-                for i in range(32):
-                    # Each note is 2 bytes (pitch, waveform, etc.)
-                    # Very rough mapping: use PCM value as pitch
-                    val = 0
-                    idx = sfx_id * 32 + i
-                    if idx < len(pcm_data):
-                        val = int((pcm_data[idx] + 32768) / 65536 * 63)
-                    f.write(f"{val:02x}00") # wave 0 (triangle), volume 0-7
-                f.write("\n")
+            for i in range(64):
+                if i in sfx_data:
+                    f.write(sfx_data[i] + "\n")
+                else:
+                    f.write(f"{i:02x}100000" + "0000" * 32 + "\n")
+            
+            f.write("__music__\n")
+            if pattern_map:
+                for p_id, p_conf in enumerate(pattern_map):
+                    channels = p_conf.get('channels', [64, 64, 64, 64]) 
+                    ch_hex = " ".join([f"{c:02x}" for c in channels])
+                    f.write(f"{p_id:02x} 00 {ch_hex}\n")
+
+    def _pack_note(self, pitch, instrument, volume, effect=0):
+        """Correctly packs PICO-8 note data into 4 hex digits (2 bytes)."""
+        pitch = max(0, min(63, int(pitch)))
+        instrument = max(0, min(15, int(instrument)))
+        volume = max(0, min(7, int(volume)))
+        effect = max(0, min(7, int(effect)))
+        
+        # Byte 0: Pitch (bits 0-5) + Instrument low (bits 6-7)
+        b0 = (pitch & 0x3F) | ((instrument & 0x03) << 6)
+        # Byte 1: Instrument high (bits 0-1) + Volume (bits 2-4) + Effect (bits 5-7)
+        b1 = ((instrument & 0x0C) >> 2) | ((volume & 0x07) << 2) | ((effect & 0x07) << 5)
+        
+        return f"{b0:02x}{b1:02x}"
+
+    def _generate_sample_sfx(self, sfx_id, pcm_chunk, speed):
+        """Generates a PICO-8 SFX for a raw sample slice."""
+        header = f"{sfx_id:02x}{speed:02x}0000"
+        notes = []
+        step = max(1, len(pcm_chunk) // 32)
+        for i in range(32):
+            pitch = 0
+            if i * step < len(pcm_chunk):
+                sample = pcm_chunk[i * step]
+                pitch = int((sample + 32768) / 65536 * 63)
+            # Use correct packing: instrument 0 (triangle), volume 7, no effect
+            notes.append(self._pack_note(pitch, 0, 7, 0))
+        return header + "".join(notes)
+
+    def _generate_melody_sfx(self, sfx_id, speed, note_list):
+        """Generates a PICO-8 SFX for a melody using sounds 0-7 as instruments."""
+        header = f"{sfx_id:02x}{speed:02x}0000"
+        notes = [self._pack_note(0, 0, 0, 0)] * 32  # Default to silent
+        for step_idx, pitch, inst, vol in note_list:
+            if step_idx < 32:
+                notes[step_idx] = self._pack_note(pitch, inst, vol, 0)
+        return header + "".join(notes)
 
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) < 2:
-        print("Usage: python3 pico8_exporter.py <data.bin> [output.p8]")
-        sys.exit(1)
-        
-    data_path = sys.argv[1]
-    output_path = sys.argv[2] if len(sys.argv) > 2 else "converted.p8"
-    
-    with open(data_path, 'rb') as f:
-        data = f.read()
-    
-    exporter = Pico8Exporter()
-    pcm = exporter.convert_to_p8_wav(data)
-    exporter.create_p8_cart(pcm, output_path)
-    print(f"PICO-8 cart created: {output_path}")
+    print("This script is now modular and should be imported into your notebooks.")
+    print("Example usage:")
+    print("  from pico8_exporter import Pico8Exporter")
+    print("  exporter = Pico8Exporter()")
+    print("  pcm = exporter.extract_pcm(data_bytes)")
+    print("  exporter.create_p8_cart(pcm, config_list, 'my_cart.p8')")
