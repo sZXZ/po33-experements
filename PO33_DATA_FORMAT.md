@@ -47,10 +47,24 @@ Data bits are grouped into bytes using **Least Significant Bit (LSB) first** ord
 - **Phase 0:** First phase received in time.
 - **Phase 3:** Fourth phase received in time.
 
-## Data Interpretation
+## Data Interpretation & Analysis
 
-The resulting binary data contains the compressed sample data and pattern metadata used by the PO-33. 
-- **Samples:** Typically 8-bit µ-law companded, 23437.5 Hz samplerate.
+The resulting binary data contains the sample data and pattern metadata. Recent analysis has revealed several key properties:
+
+### Sync/Pilot Tone
+All backup files begin with a continuous pilot tone for modem synchronization. 
+- **Structure:** In the de-interleaved Left channel, this tone consists of a repeating **128-byte period**. 
+- **Payload Boundary:** The sync tone breaks exactly at byte **2046 (0x7FE)**. This is the first point where real, non-repeating data enters the stream. Any automated parsing should look for this "period break" or the sudden increase in byte diversity.
+
+### Entropy & Scrambling
+The data payload following the sync tone exhibits extremely high entropy:
+- **Shannon Entropy:** ~7.99 bits/byte (Max 8.0).
+- **Bit Balance:** Almost exactly 50/50 balance of 0s and 1s.
+- **Redundancy:** Byte-level comparisons between patterns that are musically identical (in the "small" repeating test file) showed they are **not** identical in the binary file.
+- **Conclusion:** This indicates the PO-33 uses a **stateful scrambling** or **compression** algorithm. The raw bytes do not directly map to single samples or notes without a descrambling pass or dictionary.
+
+### Standard Audio Format (Internal)
+- **Samples:** Typically 8-bit µ-law companded, 23,437.5 Hz sample rate.
 - **Header:** The raw audio backups include a sync preamble which is stripped during the `.bin` conversion; however, the `po33_reconstitute.py` script re-generates this preamble (2 seconds of 'A' phases) to satisfy the PO-33 hardware.
 
 ## Known Limitations
