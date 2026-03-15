@@ -18,23 +18,36 @@ def phases_to_bytes(phases):
         bytes_out.append(b)
     return bytes_out
 
-def parse_po33_to_strudel(file_path, offset=0, interleaved=False, num_patterns=16):
+def get_payload_start(data):
+    """
+    Finds the start of the PO-33 data payload by scanning for the first
+    256-byte block with a high number of unique bytes, bypassing the repetitive
+    sync/pilot tones that appear at the start of all backup files.
+    """
+    for i in range(0, min(100000, len(data) - 256), 256):
+        chunk = data[i:i+256]
+        if len(set(chunk)) > 30:
+            return i
+    return 0
+    
+def parse_po33_to_strudel(file_path, interleaved=False, num_patterns=16):
     with open(file_path, 'rb') as f:
-        f.seek(offset)
-        raw = f.read(num_patterns * 256 * (2 if interleaved else 1))
+        raw = f.read()
 
     if interleaved:
-        # Replicate old notebook behavior (using interleaved L/R directly)
         data = raw
     else:
-        # Proper behavior: use Left channel
         data = raw[0::2]
+        
+    start_offset = get_payload_start(data)
+    print(f"Detected internal payload start at byte offset: {start_offset}")
 
-    # Pattern extraction
     strudel_code = ""
 
     for pat in range(num_patterns):
-        block = data[pat*256 : (pat+1)*256]
+        # We start extracting precisely from the detected start offset
+        base = start_offset + (pat * 256)
+        block = data[base : base + 256]
         if len(block) < 256:
             break
             
@@ -47,14 +60,12 @@ def parse_po33_to_strudel(file_path, offset=0, interleaved=False, num_patterns=1
                 start = (step * 64) + (voice * 16)
                 b = phases_to_bytes(phases[start : start + 16])
                 
-                # Check for emptiness
                 if b[0] != 0xAA or b[2] != 0xAA:
                     pitch = b[1] >> 4
                     voices_notes[voice+1].append(str(pitch))
                 else:
                     voices_notes[voice+1].append("~")
                     
-        # Check if pattern is totally empty
         has_notes = False
         for v in range(1, 5):
             if any(n != "~" for n in voices_notes[v]):
@@ -72,14 +83,13 @@ def parse_po33_to_strudel(file_path, offset=0, interleaved=False, num_patterns=1
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Convert PO-33 bin patterns to Strudel.cc code")
     parser.add_argument("file", help="Input .bin file")
-    parser.add_argument("--offset", type=int, default=0, help="Offset in bytes (default 0). Note: pilot tone is approx 15600 bytes.")
-    parser.add_argument("--interleaved", action="store_true", help="Use old interleaved logic (from notebook)")
+    parser.add_argument("--interleaved", action="store_true", help="Use old interleaved logic")
     parser.add_argument("--out", type=str, default="strudel_patterns.js", help="Output file")
     
     args = parser.parse_args()
     
-    print(f"Reading {args.file} at offset {args.offset}... (Interleaved: {args.interleaved})")
-    code = parse_po33_to_strudel(args.file, args.offset, args.interleaved)
+    print(f"Reading {args.file}...")
+    code = parse_po33_to_strudel(args.file, args.interleaved)
     
     if not code:
         print("No patterns found!")
